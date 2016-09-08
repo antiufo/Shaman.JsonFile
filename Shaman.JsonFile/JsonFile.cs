@@ -52,10 +52,12 @@ namespace Xamasoft
             Automatic = 4
         }
 
+        [StaticFieldCategory(StaticFieldCategory.TODO)]
         internal static readonly ConcurrentDictionary<string, JsonFileInternal> OpenFiles = new ConcurrentDictionary<string, JsonFileInternal>();
 
-
+        [StaticFieldCategory(StaticFieldCategory.Stable)]
         private static bool basePathLoaded;
+        [StaticFieldCategory(StaticFieldCategory.Stable)]
         private static string basePath;
 
         [Configuration]
@@ -190,6 +192,7 @@ namespace Xamasoft
         }
 
 #if PROTOBUF
+        [StaticFieldCategory(StaticFieldCategory.Stable)]
         private static MethodInfo _protobufSerializeOfTMethod;
         internal static MethodInfo ProtobufSerializeOfTMethod => _protobufSerializeOfTMethod ?? (_protobufSerializeOfTMethod = typeof(ProtoBuf.Serializer).GetRuntimeMethods().Single(x => x.Name == "Serialize" && x.GetParameters().Length == 2 && x.GetParameters()[0].ParameterType == typeof(Stream)));
 #endif
@@ -211,7 +214,7 @@ namespace Xamasoft
                 path = GetPath(path);
                 using (var stream = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.Delete))
                 {
-                    ProtobufSerializeOfTMethod.MakeGenericMethod(obj.GetType()).Invoke(null, new[] { stream, obj });
+                    ProtobufSerializeOfTMethod.MakeGenericMethodFast(obj.GetType()).Invoke(null, new[] { stream, obj });
                 }
                 File.Delete(path);
                 File.Move(tempPath, path);
@@ -254,6 +257,10 @@ namespace Xamasoft
 
         private long changeCount = 0;
 
+        public void DiscardAll()
+        {
+            this.data.DiscardAll();
+        }
 
         public long MaximumUncommittedChanges { get; set; }
         public long ChangeCount { get { return changeCount; } }
@@ -369,11 +376,11 @@ namespace Xamasoft
 #if PROTOBUF
                 if (format == JsonFile.Format.Protobuf)
                 {
-                    using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Delete|FileShare.Read))
+                    using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Delete | FileShare.Read))
                     {
                         this.content = ProtoBuf.Serializer.Deserialize<T>(stream);
                     }
-                    
+
                 }
                 else
 #endif
@@ -411,6 +418,7 @@ namespace Xamasoft
 
         internal void Save(bool isNew = false)
         {
+            if (path == null) throw new InvalidOperationException();
             bool shouldSave = false;
 
 #if BSON
@@ -477,7 +485,7 @@ namespace Xamasoft
         {
             if (--usageCount == 0)
             {
-                Save();
+                if (path != null) Save();
                 this.path = null;
                 JsonFileInternal dummy;
                 JsonFile.OpenFiles.TryRemove(key, out dummy);
@@ -486,7 +494,13 @@ namespace Xamasoft
 
         }
 
-
+        public void DiscardAll()
+        {
+            this.path = null;
+            JsonFileInternal dummy;
+            JsonFile.OpenFiles.TryRemove(key, out dummy);
+            content = default(T);
+        }
 
 
         public void MigrateToFormat(JsonFile.Format destinationFormat)
@@ -633,7 +647,7 @@ namespace Xamasoft
             CopyText(ToTable(items));
             return items;
         }
-        
+
         public static IEnumerable CopyTable<T>(this IEnumerable items, string caption)
         {
             CopyText(caption + "\n" + ToTable(items));
@@ -716,7 +730,7 @@ namespace Xamasoft
                 return sw.ToString();
             }
         }
-        
+
         public static string ToTable(this IEnumerable items)
         {
             using (var sw = new StringWriter())
@@ -749,7 +763,7 @@ namespace Xamasoft
                     var val = field.Get(item);
 #if !STANDALONE
                     var es = val as EntitySet;
-                    if (es != null) val = Utils.GetHateosPath(es);
+                    if (es != null) val = Utils.GetRestPath(es);
 #endif
                     tw.Write(RemoveForbiddenChars(val, separator));
                     first = false;
@@ -769,7 +783,7 @@ namespace Xamasoft
             Process.Start(temp);
             return items;
         }
-        
+
         public static IEnumerable OpenExcel<T>(this IEnumerable items)
         {
             var temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".xlsx");
@@ -789,7 +803,7 @@ namespace Xamasoft
             f.SaveAs(new FileInfo(xlsx));
             return items;
         }
-        
+
 
         public static IEnumerable SaveExcel(this IEnumerable items, string xlsx)
         {
@@ -799,15 +813,15 @@ namespace Xamasoft
             f.SaveAs(new FileInfo(xlsx));
             return items;
         }
-        
+
         private static Type GetEnumerableElementType(object ienumerable)
         {
             return ienumerable.GetType().GetInterfaces().First(x => x.GetTypeInfo().IsGenericType && x.GetGenericTypeDefinition() == typeof(IEnumerable<>)).GetGenericArguments()[0];
-            
+
         }
-        
-        
-        
+
+
+
         public static IEnumerable<T> SaveExcel<T>(this IEnumerable<T> items, OfficeOpenXml.ExcelWorksheet sheet)
         {
             SaveExcel(items, sheet, typeof(T), null);
@@ -869,14 +883,24 @@ namespace Xamasoft
                     var ent = val as Entity;
                     if (es != null)
                     {
-                        var url = (schemeAndAuthorityBase + Utils.GetHateosPath(es)).AsUri();
-                        cell.Hyperlink = url;
-                        cell.Value = url;
+                        if (schemeAndAuthorityBase != null)
+                        {
+                            var url = (schemeAndAuthorityBase + Utils.GetRestPath(es)).AsUri();
+                            cell.Hyperlink = url;
+                            cell.Value = url;
+                        }
+                        else
+                        {
+                            cell.Value = "(Collection)";
+                        }
                     }
                     else if (ent != null)
                     {
-                        var url = (schemeAndAuthorityBase + Utils.GetHateosPath(ent)).AsUri();
-                        cell.Hyperlink = url;
+                        if (schemeAndAuthorityBase != null)
+                        {
+                            var url = (schemeAndAuthorityBase + Utils.GetRestPath(ent)).AsUri();
+                            cell.Hyperlink = url;
+                        }
                         cell.Value = ent.ToStringOrIdOrDefault(ent.EntityType.Name);
                     }
                     else
