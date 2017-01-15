@@ -625,6 +625,7 @@ namespace Xamasoft
                 var s = new Thread(() => action());
                 s.Name = "RunInSTA";
                 s.SetApartmentState(ApartmentState.STA);
+                s.IsBackground = true;
                 s.Start();
                 s.Join();
                 return;
@@ -667,12 +668,12 @@ namespace Xamasoft
 
         public static void ViewTable(this IEnumerable items)
         {
-            Console.WriteLine(ToTable(items));
+            Console.WriteLine(ToTable(items, '\0'));
         }
 
         public static void ViewTable<T>(this IEnumerable<T> items)
         {
-            Console.WriteLine(ToTable(items));
+            Console.WriteLine(ToTable(items, '\0'));
         }
 
         private class Field
@@ -680,6 +681,8 @@ namespace Xamasoft
             public string Name;
             public Func<object, object> Get;
             public Type Type;
+            public int ColumnWidth;
+            public bool IsNumeric;
         }
 
         private static List<Field> GetFields(Type type)
@@ -731,45 +734,129 @@ namespace Xamasoft
             }
         }
 
+
         public static string ToTable(this IEnumerable items)
+        {
+            return ToTable(items, '\t');
+        }
+
+        private static string ToTable(this IEnumerable items, char separator)
         {
             using (var sw = new StringWriter())
             {
-                ToTable(items, GetEnumerableElementType(items), sw, '\t');
+                ToTable(items, GetEnumerableElementType(items), sw, separator);
                 return sw.ToString();
             }
         }
-
+        
         public static void ToTable(IEnumerable items, Type type, TextWriter tw, char separator)
         {
-
-            var fields = GetFields(type);
-            var first = true;
-            foreach (var field in fields)
+            var enumerator = items.GetEnumerator();
+            bool completed = false;
+            var initial = new List<object>();
+            try
             {
-                if (!first) tw.Write(separator);
-                tw.Write(field.Name);
-                first = false;
-            }
-            tw.Write('\r');
-            tw.Write('\n');
-            foreach (var item in items)
-            {
-                first = true;
-                foreach (var field in fields)
+                if (separator == '\0')
                 {
+                    for (int i = 0; i < 50; i++)
+                    {
+                        if (!enumerator.MoveNext())
+                        {
+                            completed = true;
+                            break;
+                        }
+                        else
+                        {
+                            initial.Add(enumerator.Current);
+                        }
+                    }
+                }
 
-                    if (!first) tw.Write(separator);
-                    var val = field.Get(item);
-#if !STANDALONE
-                    var es = val as EntitySet;
-                    if (es != null) val = Utils.GetRestPath(es);
-#endif
-                    tw.Write(RemoveForbiddenChars(val, separator));
-                    first = false;
+                var fields = GetFields(type);
+
+                if (separator == '\0')
+                {
+                    foreach (var field in fields)
+                    {
+                        field.ColumnWidth = field.Name.Length;
+                        foreach (var item in initial)
+                        {
+                            var val = field.Get(item);
+                            var str = RemoveForbiddenChars(val, separator);
+                            if (str != null) field.ColumnWidth = Math.Max(field.ColumnWidth, str.Length);
+                            var t = field.Type;
+                            if (t.GetTypeInfo().IsGenericType && t.GetGenericTypeDefinition() == typeof(Nullable<>)) t = Nullable.GetUnderlyingType(t);
+                            field.IsNumeric = NumericTypes.Contains(t);
+                        }
+                    }
+                }
+
+
+                
+                for (int i = 0; i < fields.Count; i++)
+                {
+                    if (separator != '\0' && i != 0) tw.Write(separator);
+                    var field = fields[i];
+                    tw.Write(field.Name);
+
+                    if (separator == '\0' && i != fields.Count - 1)
+                    {
+                        for (var k = field.Name.Length; k <= field.ColumnWidth; k++)
+                        {
+                            tw.Write(' ');
+                        }
+                    }
                 }
                 tw.Write('\r');
                 tw.Write('\n');
+                var idx = 0;
+                while (true)
+                {
+                    object item;
+                    if (initial != null && idx < initial.Count)
+                    {
+                        item = initial[idx];
+                    }
+                    else
+                    {
+                        initial = null;
+                        if (completed) break;
+                        if (!enumerator.MoveNext()) break;
+                        item = enumerator.Current;
+                    }
+
+                    for (int i = 0; i < fields.Count; i++)
+                    {
+                        var field = fields[i];
+
+                        if (separator != '\0' && i != 0) tw.Write(separator);
+                        var val = field.Get(item);
+#if !STANDALONE
+                        var es = val as EntitySet;
+                        if (es != null) val = Utils.GetRestPath(es);
+#endif
+                        var str = RemoveForbiddenChars(val, separator);
+
+                        if(!field.IsNumeric) tw.Write(str);
+                        if (separator == '\0' && i != fields.Count - 1)
+                        {
+                            for (var k = str.Length; k < field.ColumnWidth; k++)
+                            {
+                                tw.Write(' ');
+                            }
+                        }
+                        if (field.IsNumeric) tw.Write(str);
+                        if (separator == '\0') 
+                            tw.Write(' ');
+                    }
+                    tw.Write('\r');
+                    tw.Write('\n');
+                    idx++;
+                }
+            }
+            finally
+            {
+                (enumerator as IDisposable)?.Dispose();
             }
         }
 
@@ -1027,14 +1114,32 @@ namespace Xamasoft
                 if (d.TimeOfDay == TimeSpan.Zero) return d.ToString("yyyy-MM-dd");
                 return d.ToString("yyyy-MM-dd HH:mm:ss");
             }
+            string str;
 #if STANDALONE
-            var str = Convert.ToString(obj, CultureInfo.InvariantCulture);
+            if (obj is double)
+            {
+                str = ((double)obj).ToString("0.000");
+            }
+            else if (obj is float)
+            {
+                str = ((float)obj).ToString("0.000");
+            }
+            else if (obj is decimal)
+            {
+                str = ((decimal)obj).ToString("0.000");
+            }
+            else
+            { 
+                str = Convert.ToString(obj, CultureInfo.InvariantCulture);
+            }
 #else
-            var str = Conversions.ConvertToDisplayString(obj);
+            str = Conversions.ConvertToDisplayString(obj);
 #endif
             //var str = Convert.ToString(obj, CultureInfo.InvariantCulture);
             if (str == null) return null;
-            return str.Replace("\r", "").Replace('\n', ' ').Replace(separator, ' ');
+            var k = str.Replace("\r", "").Replace('\n', ' ');
+            if(separator != '\0') k = k.Replace(separator, ' ');
+            return k;
         }
 
     }
