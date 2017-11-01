@@ -1,6 +1,8 @@
-﻿using Newtonsoft.Json;
+﻿using Microsoft.CSharp.RuntimeBinder;
+using Newtonsoft.Json;
 #if !STANDALONE
 using Shaman.Rest;
+using Shaman.Runtime.ReflectionExtensions;
 using Shaman.Types;
 #endif
 using System;
@@ -13,6 +15,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -105,6 +108,11 @@ namespace Xamasoft
             return Open<T>(path, Format.Automatic);
         }
 
+        public static T Read<T>(string path)
+        {
+            return Read<T>(path, Format.Automatic);
+        }
+
         public static JsonFile<T> Open<T>(string path, Format format)
         {
             path = GetPath(path);
@@ -115,6 +123,15 @@ namespace Xamasoft
             file.AcquireReference();
             return new JsonFile<T>(file);
         }
+        
+        public static T Read<T>(string path, Format format)
+        {
+            path = GetPath(path);
+            if (format == Format.Automatic) format = GetFormatFromExtension(path);
+            var a = new JsonFileInternal<T>(path, null, format);
+            return a.Content;
+        }
+
 
         public static JsonFile<List<T>> OpenList<T>(string path)
         {
@@ -123,6 +140,15 @@ namespace Xamasoft
         public static JsonFile<List<T>> OpenList<T>(string path, Format format)
         {
             return Open<List<T>>(path, format);
+        }
+        
+        public static List<T> ReadList<T>(string path)
+        {
+            return Read<List<T>>(path, Format.Automatic);
+        }
+        public static List<T> ReadList<T>(string path, Format format)
+        {
+            return Read<List<T>>(path, format);
         }
 
         private const Format DEFAULT_JSON_FORMAT = Format.FormattedJson;
@@ -134,6 +160,16 @@ namespace Xamasoft
         public static JsonFile<List<T>> OpenList<T>()
         {
             return Open<List<T>>(GetPath(typeof(List<T>), DEFAULT_JSON_FORMAT), DEFAULT_JSON_FORMAT);
+        }
+        
+        
+        public static T Read<T>()
+        {
+            return Read<T>(GetPath(typeof(T), DEFAULT_JSON_FORMAT), DEFAULT_JSON_FORMAT);
+        }
+        public static List<T> ReadList<T>()
+        {
+            return Read<List<T>>(GetPath(typeof(List<T>), DEFAULT_JSON_FORMAT), DEFAULT_JSON_FORMAT);
         }
 
         private static string GetPath(Type type, Format format)
@@ -252,7 +288,6 @@ namespace Xamasoft
         internal JsonFile(JsonFileInternal<T> data)
         {
             this.data = data;
-            this.MaximumUncommittedChanges = 100;
         }
 
         private long changeCount = 0;
@@ -262,23 +297,29 @@ namespace Xamasoft
             this.data.DiscardAll();
         }
 
-        public long MaximumUncommittedChanges { get; set; }
+        public long MaximumUncommittedChanges { get; set; } = -1;
+        public TimeSpan MaximumUncommittedTime { get; set; } = TimeSpan.FromSeconds(60);
         public long ChangeCount { get { return changeCount; } }
 
         public void IncrementChangeCount()
         {
             changeCount++;
+            if (lastSaved == null) lastSaved = Stopwatch.StartNew();
         }
 
         public void IncrementChangeCountAndMaybeSave()
         {
             changeCount++;
+            if (lastSaved == null) lastSaved = Stopwatch.StartNew();
             MaybeSave();
         }
 
         public void MaybeSave()
         {
-            if (changeCount >= MaximumUncommittedChanges)
+            if (
+                (MaximumUncommittedChanges != -1 && changeCount >= MaximumUncommittedChanges) ||
+                (MaximumUncommittedTime.Ticks != 0 && lastSaved != null && lastSaved.Elapsed > MaximumUncommittedTime)
+                )
                 this.Save();
         }
 
@@ -308,9 +349,12 @@ namespace Xamasoft
             }
         }
 
+        Stopwatch lastSaved;
+
         public void Save()
         {
             changeCount = 0;
+            if (lastSaved != null) lastSaved.Restart();
             data.Save();
         }
 
@@ -393,7 +437,7 @@ namespace Xamasoft
             else
             {
                 this.content = Activator.CreateInstance<T>();
-                Save(true);
+                if (key != null) Save(true); // Don't create file for Read<T>()
             }
         }
 
@@ -532,7 +576,7 @@ namespace Xamasoft
         {
             string content = null;
             RunInSTA(() => { content = Clipboard.GetText(); });
-            return content;
+            return string.IsNullOrEmpty(content) ? null : content;
         }
 #endif
 
@@ -660,23 +704,65 @@ namespace Xamasoft
             return items;
         }
 #endif
+
+        private const char OUTPUT_ALIGNED = (char)0;
+        private const char OUTPUT_CSV = (char)1;
+
         public static IEnumerable<T> SaveTable<T>(this IEnumerable<T> items, string fileName)
         {
-            File.WriteAllText(fileName, ToTable(items), Encoding.UTF8);
+            ContinuationInfo dummy = null;
+            return SaveTable<T>(items, fileName, ref dummy);
+        }
+
+        public class ContinuationInfo
+        {
+            internal ContinuationInfo() { }
+            internal List<Field> fields;
+            internal bool headersWritten;
+        }
+
+        public static IEnumerable<T> SaveTable<T>(this IEnumerable<T> items, string fileName, ref ContinuationInfo continuationInfo)
+        {
+            if (fileName.EndsWith(".xlsx") || fileName.EndsWith(".xls"))
+            {
+                return SaveExcel(items, fileName);
+            }
+
+            var writer = fileName.StartsWith("CON:") ? Console.Out : null;
+
+            using (var fileout = writer != null ? null : new StreamWriter(File.Open(fileName, FileMode.Create, FileAccess.Write, FileShare.Delete | FileShare.Read), Encoding.UTF8))
+            {
+                if (writer == null) writer = fileout;
+                if (fileName.EndsWith(".json"))
+                {
+                    var serializer = new JsonSerializer();
+#if !STANDALONE
+                    serializer.AddAwdeeConverters();
+#endif
+                    serializer.Formatting = Formatting.Indented;
+                    serializer.Serialize(writer, items.ToList());
+                    writer.WriteLine();
+                }
+                else
+                {
+                    if (continuationInfo == null) continuationInfo = new ContinuationInfo();
+                    ToTable(items, typeof(T), writer, fileName.EndsWith(".txt-preformatted") ? OUTPUT_ALIGNED : fileName.EndsWith(".csv") ? OUTPUT_CSV : '\t', continuationInfo);
+                }
+            }
             return items;
         }
 
         public static void ViewTable(this IEnumerable items)
         {
-            Console.WriteLine(ToTable(items, '\0'));
+            Console.WriteLine(ToTable(items, OUTPUT_ALIGNED));
         }
 
         public static void ViewTable<T>(this IEnumerable<T> items)
         {
-            Console.WriteLine(ToTable(items, '\0'));
+            Console.WriteLine(ToTable(items, OUTPUT_ALIGNED));
         }
 
-        private class Field
+        internal class Field
         {
             public string Name;
             public Func<object, object> Get;
@@ -748,15 +834,24 @@ namespace Xamasoft
                 return sw.ToString();
             }
         }
-        
+
         public static void ToTable(IEnumerable items, Type type, TextWriter tw, char separator)
+        {
+            var continuationInfo = new ContinuationInfo();
+            ToTable(items, type, tw, separator, continuationInfo);
+        }
+
+
+
+
+        private static void ToTable(IEnumerable items, Type type, TextWriter tw, char separator, ContinuationInfo continuationInfo)
         {
             var enumerator = items.GetEnumerator();
             bool completed = false;
             var initial = new List<object>();
             try
             {
-                if (separator == '\0')
+                if (separator == OUTPUT_ALIGNED)
                 {
                     for (int i = 0; i < 50; i++)
                     {
@@ -772,18 +867,23 @@ namespace Xamasoft
                     }
                 }
 
-                var fields = GetFields(type);
-
-                if (separator == '\0')
+                var fields = continuationInfo.fields;
+                if (fields == null)
                 {
-                    foreach (var field in fields)
+                    fields = GetFields(type);
+                    continuationInfo.fields = fields;
+
+                    if (separator == OUTPUT_ALIGNED)
                     {
-                        field.ColumnWidth = field.Name.Length;
-                        foreach (var item in initial)
+                        foreach (var field in fields)
                         {
-                            var val = field.Get(item);
-                            var str = RemoveForbiddenChars(val, separator);
-                            if (str != null) field.ColumnWidth = Math.Max(field.ColumnWidth, str.Length);
+                            field.ColumnWidth = field.Name.Length;
+                            foreach (var item in initial)
+                            {
+                                var val = field.Get(item);
+                                var str = RemoveForbiddenChars(val, separator);
+                                if (str != null) field.ColumnWidth = Math.Max(field.ColumnWidth, str.Length);
+                            }
                             var t = field.Type;
                             if (t.GetTypeInfo().IsGenericType && t.GetGenericTypeDefinition() == typeof(Nullable<>)) t = Nullable.GetUnderlyingType(t);
                             field.IsNumeric = NumericTypes.Contains(t);
@@ -791,24 +891,30 @@ namespace Xamasoft
                     }
                 }
 
-
-                
-                for (int i = 0; i < fields.Count; i++)
+                if (!continuationInfo.headersWritten && (fields.Count > 1 || separator == OUTPUT_CSV))
                 {
-                    if (separator != '\0' && i != 0) tw.Write(separator);
-                    var field = fields[i];
-                    tw.Write(field.Name);
-
-                    if (separator == '\0' && i != fields.Count - 1)
+                    continuationInfo.headersWritten = true;
+                    for (int i = 0; i < fields.Count; i++)
                     {
-                        for (var k = field.Name.Length; k <= field.ColumnWidth; k++)
+                        if (i != 0)
                         {
-                            tw.Write(' ');
+                            if (separator == OUTPUT_CSV) tw.Write(',');
+                            else if (separator != OUTPUT_ALIGNED) tw.Write(separator);
+                        }
+                        var field = fields[i];
+                        tw.Write(field.Name);
+
+                        if (separator == OUTPUT_ALIGNED && i != fields.Count - 1)
+                        {
+                            for (var k = field.Name.Length; k <= field.ColumnWidth; k++)
+                            {
+                                tw.Write(' ');
+                            }
                         }
                     }
+                    tw.Write('\r');
+                    tw.Write('\n');
                 }
-                tw.Write('\r');
-                tw.Write('\n');
                 var idx = 0;
                 while (true)
                 {
@@ -829,7 +935,11 @@ namespace Xamasoft
                     {
                         var field = fields[i];
 
-                        if (separator != '\0' && i != 0) tw.Write(separator);
+                        if (i != 0)
+                        {
+                            if (separator == OUTPUT_CSV) tw.Write(',');
+                            else if (separator != OUTPUT_ALIGNED) tw.Write(separator);
+                        }
                         var val = field.Get(item);
 #if !STANDALONE
                         var es = val as EntitySet;
@@ -837,8 +947,16 @@ namespace Xamasoft
 #endif
                         var str = RemoveForbiddenChars(val, separator);
 
+                        var shouldWrap = separator == OUTPUT_CSV && (str.IndexOf('"') != -1 || str.IndexOf(',') != -1);
+                        if (shouldWrap)
+                        {
+                            tw.Write('"');
+                            str = str.Replace("\"", "\"\"");
+                        }
+                        
+
                         if(!field.IsNumeric) tw.Write(str);
-                        if (separator == '\0' && i != fields.Count - 1)
+                        if (separator == OUTPUT_ALIGNED && (i != fields.Count - 1 || fields[fields.Count - 1].IsNumeric))
                         {
                             for (var k = str.Length; k < field.ColumnWidth; k++)
                             {
@@ -846,7 +964,10 @@ namespace Xamasoft
                             }
                         }
                         if (field.IsNumeric) tw.Write(str);
-                        if (separator == '\0') 
+
+                        if (shouldWrap) tw.Write('"');
+
+                        if (separator == OUTPUT_ALIGNED && i != fields.Count - 1) 
                             tw.Write(' ');
                     }
                     tw.Write('\r');
@@ -884,6 +1005,7 @@ namespace Xamasoft
 
         public static IEnumerable<T> SaveExcel<T>(this IEnumerable<T> items, string xlsx)
         {
+            if (xlsx.EndsWith(".xls")) throw new NotSupportedException("XLS is not supported, only XLSX.");
             var f = new OfficeOpenXml.ExcelPackage();
             var sheet = f.Workbook.Worksheets.Add("Sheet1");
             SaveExcel(items, sheet);
@@ -1025,7 +1147,48 @@ namespace Xamasoft
             t.TableStyle = OfficeOpenXml.Table.TableStyles.None;
         }
 
+/*
+        public static string ToMatrixForPowershell(this IEnumerable<object> rows)
+        {
+            return ToMatrix(rows.SelectMany(
+                row => (IEnumerable<object>)GetPowershellProperty(row, "Value", ref CallSiteRowValue), 
+                (row, cell) => new { Row = Convert.ToString(GetPowershellProperty(row, "Key", ref CallSiteRowKey), CultureInfo.InvariantCulture), Cell = GetPowershellProperty(cell, "Value", ref CallSiteCellValue), Col = Convert.ToString(GetPowershellProperty(cell, "Key", ref CallSiteCellKey), CultureInfo.InvariantCulture) }),
+                x => x.Row, x => x.Col, x => x.Cell);
+        }
 
+
+        static CallSite<Func<CallSite, object, object>> CallSiteRowKey;        
+        static CallSite<Func<CallSite, object, object>> CallSiteRowValue;
+        static CallSite<Func<CallSite, object, object>> CallSiteCellKey;
+        static CallSite<Func<CallSite, object, object>> CallSiteCellValue;
+
+        private static object GetPowershellProperty(object obj, string name, ref CallSite<Func<CallSite, object, object>> callsite)
+        {
+            try
+            {
+                var ht = obj as System.Collections.Hashtable;
+                if (ht != null) return ht[name];
+                var dyn = obj as System.Dynamic.IDynamicMetaObjectProvider;
+                if (dyn != null)
+                {
+                    if(callsite == null)
+                        callsite = CallSite<Func<CallSite, object, object>>.Create(Microsoft.CSharp.RuntimeBinder.Binder.GetMember(CSharpBinderFlags.None, name, typeof(JsonFile), new CSharpArgumentInfo[] { CSharpArgumentInfo.Create(CSharpArgumentInfoFlags.None, null) }));
+                    return callsite.Target(callsite, obj);
+                }
+
+                return obj.GetFieldOrProperty(name);
+            }
+            catch(Exception ex)
+            {
+                throw new Exception("Cannot retrieve property '" + name + "' from object of type '" + (obj == null ? "null" : obj.GetType().FullName) + "': " + ex.Message, ex);
+            }
+        }
+*/
+
+        public static string ToMatrix<TRow, TColumn, TCell>(this IEnumerable<KeyValuePair<TRow, IEnumerable<KeyValuePair<TColumn, TCell>>>> rows)
+        {
+            return ToMatrix(rows.SelectMany(row => row.Value, (row, cell) => new { Row = row.Key, Cell = cell.Value, Col = cell.Key }), x => x.Row, x => x.Col, x => x.Cell);
+        }
 
         public static string ToMatrix<T, TRow, TColumn, TCell>(this IEnumerable<T> items, Func<T, TRow> getRow, Func<T, TColumn> getColumn, Func<T, TCell> getCell)
         {
@@ -1102,7 +1265,7 @@ namespace Xamasoft
         }
         public static string RemoveForbiddenChars(object obj, char separator)
         {
-            if (obj == null) return null;
+            if (obj == null) return string.Empty;
             if (obj is DateTimeOffset)
             {
                 obj = new DateTime(((DateTimeOffset)obj).Ticks);
@@ -1110,7 +1273,7 @@ namespace Xamasoft
             if (obj is DateTime)
             {
                 var d = (DateTime)obj;
-                if (d.Ticks < TimeSpan.FromDays(2).Ticks) return null;
+                if (d.Ticks < TimeSpan.FromDays(2).Ticks) return string.Empty;
                 if (d.TimeOfDay == TimeSpan.Zero) return d.ToString("yyyy-MM-dd");
                 return d.ToString("yyyy-MM-dd HH:mm:ss");
             }
@@ -1136,11 +1299,110 @@ namespace Xamasoft
             str = Conversions.ConvertToDisplayString(obj);
 #endif
             //var str = Convert.ToString(obj, CultureInfo.InvariantCulture);
-            if (str == null) return null;
+            if (str == null) return string.Empty;
             var k = str.Replace("\r", "").Replace('\n', ' ');
-            if(separator != '\0') k = k.Replace(separator, ' ');
+            if(separator != OUTPUT_ALIGNED) k = k.Replace(separator, ' ');
             return k;
         }
+
+
+#if !STANDALONE
+        public static Type CreateAnonymousType(IEnumerable<string> fieldNames)
+        {
+            var t = Querylang.QType.CreateAnonymousType(fieldNames.Select(x => new KeyValuePair<string, Type>(x, typeof(object)))).clrType;
+            return t;
+        }
+
+
+
+
+        public static IEnumerable<object> CreateAnonymousEnumerable<T>(IEnumerable<T> items, IReadOnlyList<(string name, Func<T, object> retriever)> fields, out Type elementType)
+        {
+            var t = ReplExtensions.CreateAnonymousType(fields.Select(x => x.name));
+            elementType = t;
+
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericTypeFast(t));
+
+            var setters = fields.Select(x => ReflectionHelper.GetSetter<object, object>(t.GetField(x.name))).ToList();
+
+
+            var z = typeof(AnonymousEnumerable<,>).MakeGenericTypeFast(typeof(T), elementType);
+            var enumerable = (AnonymousEnumerableBase<T>)Activator.CreateInstance(z);
+            enumerable.source = items;
+            enumerable.setters = setters;
+            enumerable.fields = fields;
+            return (IEnumerable<object>)enumerable;
+        }
+
+
+        internal class AnonymousEnumerableBase<T>
+        {
+            internal IEnumerable<T> source;
+            internal List<Action<object, object>> setters;
+            internal IReadOnlyList<(string name, Func<T, object> retriever)> fields;
+        }
+
+        internal class AnonymousEnumerable<TSource, TResult> : AnonymousEnumerableBase<TSource>, IEnumerable<TResult> where TResult : new()
+        {
+            public IEnumerator<TResult> GetEnumerator()
+            {
+                return new AnonymousEnumerator<TSource, TResult>(this);
+            }
+
+            IEnumerator IEnumerable.GetEnumerator()
+            {
+                return new AnonymousEnumerator<TSource, TResult>(this);
+            }
+
+        }
+
+
+        internal class AnonymousEnumerator<TSource, TResult> : IEnumerator<TResult> where TResult : new()
+        {
+            private AnonymousEnumerable<TSource, TResult> anonymousEnumerable;
+            private IEnumerator<TSource> source;
+            private TResult current;
+
+            internal AnonymousEnumerator(AnonymousEnumerable<TSource, TResult> anonymousEnumerable)
+            {
+                this.anonymousEnumerable = anonymousEnumerable;
+                this.source = anonymousEnumerable.source.GetEnumerator();
+            }
+
+            public TResult Current => current;
+
+            object IEnumerator.Current => current;
+
+            public void Dispose()
+            {
+                this.source.Dispose();
+            }
+
+            public bool MoveNext()
+            {
+                if (!source.MoveNext()) return false;
+                var item = source.Current;
+                var row = new TResult();
+                var fieldIdx = 0;
+                var setters = anonymousEnumerable.setters;
+                foreach (var field in anonymousEnumerable.fields)
+                {
+                    var val = field.retriever(item);
+                    setters[fieldIdx](row, val);
+                    fieldIdx++;
+                }
+                current = row;
+                return true;
+            }
+
+            public void Reset()
+            {
+                throw new NotSupportedException();
+            }
+        }
+
+
+#endif
 
     }
 
