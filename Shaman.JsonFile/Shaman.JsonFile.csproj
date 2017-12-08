@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <VersionPrefix>1.0.1.8</VersionPrefix>
+    <VersionPrefix>1.0.1.11</VersionPrefix>
     <Authors>Andrea Martinelli</Authors>
     <TargetFrameworks>net45;netstandard2.0</TargetFrameworks>
     <DefineConstants>$(DefineConstants);STANDALONE;SMALL_LIB_AWDEE;PROTOBUF</DefineConstants>
@@ -10,9 +10,10 @@
     <PublicSign Condition=" '$(OS)' != 'Windows_NT' ">true</PublicSign>
     <PackageId>Shaman.JsonFile</PackageId>
     <PackageIconUrl>http://shaman.io/images/shaman-nuget-icon.png</PackageIconUrl>
-    <PackageProjectUrl>http://shaman.io/</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/antiufo/Shaman.JsonFile</PackageProjectUrl>
+    <Description>JSON/Protobuf serialization utilities, and console/CSV output support</Description>
     <PackageTargetFallback Condition=" '$(TargetFramework)' == 'netstandard1.3' ">$(PackageTargetFallback);portable-net45+win8+wp8+wpa81</PackageTargetFallback>
-    <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Charts.cs" />
@@ -25,6 +26,7 @@
     <PackageReference Include="protobuf-net" Version="2.1.0" />
     <PackageReference Include="Shaman.Reflection" Version="1.0.0.22" />
     <PackageReference Include="Shaman.ValueString" Version="1.0.2.31" />
+    <PackageReference Include="System.ValueTuple" Version="4.4.0" />
   </ItemGroup>
   <ItemGroup Condition=" '$(TargetFramework)' == 'net45' ">
     <Reference Include="System.Windows.Forms" />

@@ -22,14 +22,9 @@ using System.Threading.Tasks;
 #if !CORECLR
 using System.Windows.Forms;
 #endif
-// using JsonTypeDefinition = Xamasoft.JsonClassGenerator.JsonType;
-// using JsonTypeEnum = Xamasoft.JsonClassGenerator.JsonTypeEnum;
+using static Shaman.Runtime.ReplExtensions;
 
-#if SMALL_LIB_AWDEE
 namespace Shaman.Runtime
-#else
-namespace Xamasoft
-#endif
 {
 
 #if !STANDALONE
@@ -279,7 +274,7 @@ namespace Xamasoft
 
 
         }
-
+        
     }
 
     public class JsonFile<T> : IDisposable
@@ -590,77 +585,7 @@ namespace Xamasoft
         {
             return JsonConvert.SerializeObject(obj, Formatting.Indented);
         }
-
-        //public static object PasteAsJson()
-        //{
-        //    return DeserializeJson(PasteAsText());
-        //}
-
-        //private static int asmIndex;
-
-        //private static ConstructorInfo JsonPropertyAttributeConstructor;
-
-        //private static Type GetType(JsonTypeDefinition definition, ModuleBuilder moduleBuilder, Dictionary<JsonTypeDefinition, Type> existingTypes)
-        //{
-        //    switch (definition.Type)
-        //    {
-        //        case JsonTypeEnum.Anything: return typeof(object);
-        //        case JsonTypeEnum.Array: return Array.CreateInstance(GetType(definition.InternalType, moduleBuilder, existingTypes), 0).GetType();
-        //        case JsonTypeEnum.Boolean: return typeof(bool);
-        //        case JsonTypeEnum.Date: return typeof(DateTime);
-        //        case JsonTypeEnum.Dictionary: throw Sanity.NotImplemented();
-        //        case JsonTypeEnum.Float: return typeof(float);
-        //        case JsonTypeEnum.Integer: return typeof(int);
-        //        case JsonTypeEnum.Long: return typeof(long);
-        //        case JsonTypeEnum.NonConstrained: return typeof(object);
-        //        case JsonTypeEnum.NullableBoolean: return typeof(bool?);
-        //        case JsonTypeEnum.NullableDate: return typeof(DateTime?);
-        //        case JsonTypeEnum.NullableFloat: return typeof(float?);
-        //        case JsonTypeEnum.NullableInteger: return typeof(int?);
-        //        case JsonTypeEnum.NullableLong: return typeof(long?);
-        //        case JsonTypeEnum.NullableSomething: return typeof(object);
-        //        case JsonTypeEnum.Object: break;
-        //        case JsonTypeEnum.String: return typeof(string);
-        //        default: throw new NotSupportedException();
-        //    }
-        //    if (existingTypes.ContainsKey(definition)) return existingTypes[definition];
-        //    var builder = moduleBuilder.DefineType(definition.AssignedName);
-
-        //    foreach (var field in definition.Fields)
-        //    {
-        //        var fieldBuilder = builder.DefineField(field.MemberName, GetType(field.Type, moduleBuilder, existingTypes), FieldAttributes.Public);
-        //        var attrBuilder = new CustomAttributeBuilder(JsonPropertyAttributeConstructor, new object[] { field.JsonMemberName });
-        //        fieldBuilder.SetCustomAttribute(attrBuilder);
-        //    }
-        //    return builder.CreateType();
-        //}
-
-        //public static object DeserializeJson(string json)
-        //{
-        //    if (JsonPropertyAttributeConstructor == null)
-        //    {
-        //        JsonPropertyAttributeConstructor = typeof(JsonPropertyAttribute).GetConstructor(new[] { typeof(string) });
-        //    }
-
-
-        //    var gen = new JsonClassGenerator.JsonClassGenerator();
-        //    gen.CodeWriter = new JsonClassGenerator.CodeWriters.CSharpCodeWriter();
-        //    gen.Example = json;
-        //    var name = "Json" + Interlocked.Increment(ref asmIndex);
-        //    gen.MainClass = name;
-        //    var sw = new StringWriter();
-        //    gen.OutputStream = sw;
-        //    gen.UseNestedClasses = true;
-        //    gen.UsePascalCase = true;
-        //    gen.UseProperties = true;
-        //    gen.GenerateClasses();
-
-        //    var asmb = Thread.GetDomain().DefineDynamicAssembly(new AssemblyName(name), System.Reflection.Emit.AssemblyBuilderAccess.RunAndCollect);
-        //    var modb = asmb.DefineDynamicModule(name);
-        //    var type = GetType(gen.Types.Single(x => x.IsRoot), modb, new Dictionary<JsonTypeDefinition, Type>());
-        //    return JsonConvert.DeserializeObject(json, type);
-        //}
-
+        
 #if !CORECLR
         private static void RunInSTA(Action action)
         {
@@ -725,10 +650,11 @@ namespace Xamasoft
         {
             if (fileName.EndsWith(".xlsx") || fileName.EndsWith(".xls"))
             {
+                if (fileName.StartsWith("CON:")) return OpenExcel(items);
                 return SaveExcel(items, fileName);
             }
 
-            var writer = fileName.StartsWith("CON:") ? Console.Out : null;
+            var writer = fileName.StartsWith("CLIPBOARD:") ? new StringWriter() : fileName.StartsWith("CON:") ? Console.Out : null;
 
             using (var fileout = writer != null ? null : new StreamWriter(File.Open(fileName, FileMode.Create, FileAccess.Write, FileShare.Delete | FileShare.Read), Encoding.UTF8))
             {
@@ -746,32 +672,43 @@ namespace Xamasoft
                 else
                 {
                     if (continuationInfo == null) continuationInfo = new ContinuationInfo();
-                    ToTable(items, typeof(T), writer, fileName.EndsWith(".txt-preformatted") ? OUTPUT_ALIGNED : fileName.EndsWith(".csv") ? OUTPUT_CSV : '\t', continuationInfo);
+                    ToTable(items, typeof(T), writer, fileName.EndsWith(".txt-preformatted") ? OUTPUT_ALIGNED : fileName.EndsWith(".csv") ? OUTPUT_CSV : '\t', writer == Console.Out, continuationInfo);
                 }
+            }
+
+            if (fileName.StartsWith("CLIPBOARD:"))
+            {
+#if CORECLR
+                throw new PlatformNotSupportedException("Copy to clipboard is not implemented for .NET standard.");
+#else
+                var t = ((StringWriter)writer).ToString();
+                CopyText(t);
+#endif
             }
             return items;
         }
 
         public static void ViewTable(this IEnumerable items)
         {
-            Console.WriteLine(ToTable(items, OUTPUT_ALIGNED));
+            Console.WriteLine(ToTable(items, OUTPUT_ALIGNED, true));
         }
 
         public static void ViewTable<T>(this IEnumerable<T> items)
         {
-            Console.WriteLine(ToTable(items, OUTPUT_ALIGNED));
+            Console.WriteLine(ToTable(items, OUTPUT_ALIGNED, true));
         }
 
         internal class Field
         {
             public string Name;
+            public object RawField;
             public Func<object, object> Get;
             public Type Type;
             public int ColumnWidth;
             public bool IsNumeric;
         }
 
-        private static List<Field> GetFields(Type type)
+        internal static List<Field> GetFields(Type type)
         {
 #if !STANDALONE
             if (type.Is<Entity>())
@@ -779,6 +716,7 @@ namespace Xamasoft
                 return EntityType.FromNativeType(type).Fields.Select(x => new Field()
                 {
                     Name = x.Name,
+                    RawField = x,
                     Get = new Func<object, object>(y =>
                     {
                         var ent = (Entity)y;
@@ -788,6 +726,11 @@ namespace Xamasoft
                 }).ToList();
             };
 #endif
+
+            var k = Nullable.GetUnderlyingType(type) ?? type;
+            if (type == typeof(string) || k.IsPrimitive || type == typeof(object))
+                return new List<Field>() { new Field() { Name = "Value", Type = type, IsNumeric = IsNumeric(type), Get = x => x } };
+
             var emptyArray = new object[] { };
             var fields =
             type.GetTypeInfo().IsPrimitive || type.GetTypeInfo().IsEnum || type == typeof(string) ? new[] { new Field { Name = "Value", Get = new Func<object, object>(y => y), Type = type } }.ToList() :
@@ -795,7 +738,7 @@ namespace Xamasoft
 #if !STANDALONE
             .Where(x => x.GetCustomAttribute<RestrictedAccessAttribute>() == null)
 #endif
-            .Select(x => new Field { Name = x.Name, Get = new Func<object, object>(y => x.GetValue(y)), Type = x.FieldType })
+            .Select(x => new Field { Name = x.Name, RawField = x, Get = ReflectionHelper.GetGetter<object, object>(x), Type = x.FieldType })
             .Union(type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
             .Where(x =>
                  x.GetIndexParameters().Length == 0
@@ -804,18 +747,31 @@ namespace Xamasoft
                  && x.GetMethod.GetCustomAttribute<RestrictedAccessAttribute>() == null
 #endif
 )
-             .Select(x => new Field { Name = x.Name, Get = new Func<object, object>(y => x.GetValue(y, emptyArray)), Type = x.PropertyType }))
+             .Select(x => new Field { Name = x.Name, RawField = x, Get = ReflectionHelper.GetGetter<object, object>(x), Type = x.PropertyType }))
             .ToList();
             return fields;
 
         }
 
+        [StaticFieldCategory(StaticFieldCategory.Stable)]
+        internal static readonly Type[] NumericTypes = new[]{
+           typeof(Byte),typeof(SByte),
+           typeof(Int16),typeof(Int32),typeof(Int64),
+           typeof(UInt16),typeof(UInt32),typeof(UInt64),
+           typeof(Single),typeof(Double),typeof(Decimal)
+       };
+
+        private static bool IsNumeric(Type type)
+        {
+            type = Nullable.GetUnderlyingType(type) ?? type;
+            return NumericTypes.Contains(type);
+        }
 
         public static string ToTable<T>(this IEnumerable<T> items)
         {
             using (var sw = new StringWriter())
             {
-                ToTable(items, typeof(T), sw, '\t');
+                ToTable(items, typeof(T), sw, '\t', false);
                 return sw.ToString();
             }
         }
@@ -823,28 +779,28 @@ namespace Xamasoft
 
         public static string ToTable(this IEnumerable items)
         {
-            return ToTable(items, '\t');
+            return ToTable(items, '\t', false);
         }
 
-        private static string ToTable(this IEnumerable items, char separator)
+        private static string ToTable(this IEnumerable items, char separator, bool forConsole)
         {
             using (var sw = new StringWriter())
             {
-                ToTable(items, GetEnumerableElementType(items), sw, separator);
+                ToTable(items, GetEnumerableElementType(items), sw, separator, forConsole);
                 return sw.ToString();
             }
         }
 
-        public static void ToTable(IEnumerable items, Type type, TextWriter tw, char separator)
+        public static void ToTable(IEnumerable items, Type type, TextWriter tw, char separator, bool forConsole)
         {
             var continuationInfo = new ContinuationInfo();
-            ToTable(items, type, tw, separator, continuationInfo);
+            ToTable(items, type, tw, separator, forConsole, continuationInfo);
         }
 
 
 
 
-        private static void ToTable(IEnumerable items, Type type, TextWriter tw, char separator, ContinuationInfo continuationInfo)
+        private static void ToTable(IEnumerable items, Type type, TextWriter tw, char separator, bool forConsole, ContinuationInfo continuationInfo)
         {
             var enumerator = items.GetEnumerator();
             bool completed = false;
@@ -887,6 +843,34 @@ namespace Xamasoft
                             var t = field.Type;
                             if (t.GetTypeInfo().IsGenericType && t.GetGenericTypeDefinition() == typeof(Nullable<>)) t = Nullable.GetUnderlyingType(t);
                             field.IsNumeric = NumericTypes.Contains(t);
+                            field.ColumnWidth++;
+                        }
+
+                        if (forConsole)
+                        {
+                            var bufwidth = Console.BufferWidth;
+                            var total = fields.Sum(x => x.ColumnWidth);
+
+                            if (total > bufwidth)
+                            {
+                                var totalNumeric = fields.Where(x => x.IsNumeric).Sum(x => x.ColumnWidth);
+                                var totalNonNumeric = total - totalNumeric;
+                                
+                                var availableForNonNumeric = bufwidth - totalNumeric;
+                                var fairQuote = availableForNonNumeric / fields.Count(x => !x.IsNumeric);
+
+                                var tofix = fields.Where(x => !x.IsNumeric && x.ColumnWidth > fairQuote).ToList();
+
+                                var availableForRemaining = bufwidth - fields.Except(tofix).Sum(x => x.ColumnWidth);
+                                var fairQuoteForRemaining = Math.Max(3, availableForRemaining / tofix.Count);
+
+                                foreach (var item in tofix)
+                                {
+                                    item.ColumnWidth = fairQuoteForRemaining;
+                                }
+
+                            }
+
                         }
                     }
                 }
@@ -902,11 +886,12 @@ namespace Xamasoft
                             else if (separator != OUTPUT_ALIGNED) tw.Write(separator);
                         }
                         var field = fields[i];
-                        tw.Write(field.Name);
+                        var name = MaybeTrim(field.Name, field, separator);
+                        tw.Write(name);
 
                         if (separator == OUTPUT_ALIGNED && i != fields.Count - 1)
                         {
-                            for (var k = field.Name.Length; k <= field.ColumnWidth; k++)
+                            for (var k = name.Length; k < field.ColumnWidth; k++)
                             {
                                 tw.Write(' ');
                             }
@@ -947,28 +932,33 @@ namespace Xamasoft
 #endif
                         var str = RemoveForbiddenChars(val, separator);
 
+                        str = MaybeTrim(str, field, separator);
+
                         var shouldWrap = separator == OUTPUT_CSV && (str.IndexOf('"') != -1 || str.IndexOf(',') != -1);
                         if (shouldWrap)
                         {
                             tw.Write('"');
                             str = str.Replace("\"", "\"\"");
                         }
-                        
 
-                        if(!field.IsNumeric) tw.Write(str);
+
+
+                        if (!field.IsNumeric) tw.Write(str);
                         if (separator == OUTPUT_ALIGNED && (i != fields.Count - 1 || fields[fields.Count - 1].IsNumeric))
                         {
-                            for (var k = str.Length; k < field.ColumnWidth; k++)
+                            var k = str.Length;
+                            if (field.IsNumeric) k++;
+                            for (; k < field.ColumnWidth; k++)
                             {
                                 tw.Write(' ');
                             }
                         }
                         if (field.IsNumeric) tw.Write(str);
 
+                        if (separator == OUTPUT_ALIGNED && field.IsNumeric && i != fields.Count - 1)
+                            tw.Write(' ');
                         if (shouldWrap) tw.Write('"');
 
-                        if (separator == OUTPUT_ALIGNED && i != fields.Count - 1) 
-                            tw.Write(' ');
                     }
                     tw.Write('\r');
                     tw.Write('\n');
@@ -979,6 +969,14 @@ namespace Xamasoft
             {
                 (enumerator as IDisposable)?.Dispose();
             }
+        }
+
+        private static string MaybeTrim(string val, Field field, char separator)
+        {
+            if (separator != OUTPUT_ALIGNED) return val;
+            var maxwidth = field.ColumnWidth - 1;
+            if (val.Length > maxwidth) return val.Substring(0, maxwidth);
+            return val;
         }
 
 #if !STANDALONE
@@ -1037,19 +1035,7 @@ namespace Xamasoft
             return items;
         }
 
-        //internal static object Unexpand(object item)
-        //{
-        //    var exp = item as ExpandedEntity;
-        //    if (exp != null) return exp.Entity;
-        //    return item;
-        //}
 
-        internal static readonly Type[] NumericTypes = new[]{
-           typeof(Byte),typeof(SByte),
-           typeof(Int16),typeof(Int32),typeof(Int64),
-           typeof(UInt16),typeof(UInt32),typeof(UInt64),
-           typeof(Single),typeof(Double),typeof(Decimal)
-        };
 
         public static void SaveExcel(IEnumerable items, OfficeOpenXml.ExcelWorksheet sheet, Type elementType, string schemeAndAuthorityBase)
         {
@@ -1088,9 +1074,7 @@ namespace Xamasoft
                     var cell = sheet.Cells[row, col];
                     var val = prop.Get(item);
 #if !STANDALONE
-                    var es = val as EntitySet;
-                    var ent = val as Entity;
-                    if (es != null)
+                    if (val is EntitySet es)
                     {
                         if (schemeAndAuthorityBase != null)
                         {
@@ -1103,7 +1087,7 @@ namespace Xamasoft
                             cell.Value = "(Collection)";
                         }
                     }
-                    else if (ent != null)
+                    else if (val is Entity ent)
                     {
                         if (schemeAndAuthorityBase != null)
                         {
@@ -1114,20 +1098,35 @@ namespace Xamasoft
                     }
                     else
 #endif
-                    if (val is Uri)
+                    if (val is Uri url)
                     {
-                        var url = (Uri)val;
                         cell.Hyperlink = url;
                         cell.Value = url.AbsoluteUri;
                         //cell.Style.sy
                     }
 #if !STANDALONE
-                    else if (val is Money)
+                    else if (val is Money money)
                     {
-                        var money = (Money)val;
                         cell.Value = money.CurrencyValue;
                         if (money.CurrencyType != Currency.None)
                             cell.Style.Numberformat.Format = Money.GetExcelFormat(money.CurrencyType);
+                    }
+                    else if (val is ICollection collection)
+                    {
+                        if (collection.Count == 0) cell.Value = null;
+                        else if (collection.Count == 1) cell.Value = collection.Cast<object>().First();
+                        else
+                        {
+                            var sb = ReseekableStringBuilder.AcquirePooledStringBuilder();
+                            var first = true;
+                            foreach (var z in collection)
+                            {
+                                if (!first) sb.Append(',');
+                                sb.Append(z);
+                                first = false;
+                            }
+                            cell.Value = ReseekableStringBuilder.GetValueAndRelease(sb);
+                        }
                     }
 #endif
                     else
@@ -1266,16 +1265,29 @@ namespace Xamasoft
         public static string RemoveForbiddenChars(object obj, char separator)
         {
             if (obj == null) return string.Empty;
-            if (obj is DateTimeOffset)
+            if (obj is DateTimeOffset datetimeoffset)
             {
-                obj = new DateTime(((DateTimeOffset)obj).Ticks);
+                obj = new DateTime(datetimeoffset.UtcTicks, DateTimeKind.Utc);
             }
-            if (obj is DateTime)
+            if (obj is DateTime d)
             {
-                var d = (DateTime)obj;
                 if (d.Ticks < TimeSpan.FromDays(2).Ticks) return string.Empty;
-                if (d.TimeOfDay == TimeSpan.Zero) return d.ToString("yyyy-MM-dd");
-                return d.ToString("yyyy-MM-dd HH:mm:ss");
+                if (d.TimeOfDay == TimeSpan.Zero) obj = d.ToString("yyyy-MM-dd");
+                else obj = d.ToString("yyyy-MM-dd HH:mm:ss");
+            }
+
+            if (obj is System.Collections.ICollection col)
+            {
+                if (col.Count == 0) return string.Empty;
+                var sb = ReseekableStringBuilder.AcquirePooledStringBuilder();
+                var first = true;
+                foreach (var item in col)
+                {
+                    if (!first) sb.Append(",");
+                    sb.Append(RemoveForbiddenChars(item, '\0'));
+                    first = false;
+                }
+                obj = ReseekableStringBuilder.GetValueAndRelease(sb);
             }
             string str;
 #if STANDALONE
@@ -1306,19 +1318,25 @@ namespace Xamasoft
         }
 
 
-#if !STANDALONE
+
         public static Type CreateAnonymousType(IEnumerable<string> fieldNames)
         {
-            var t = Querylang.QType.CreateAnonymousType(fieldNames.Select(x => new KeyValuePair<string, Type>(x, typeof(object)))).clrType;
-            return t;
+            return CreateAnonymousType(fieldNames.Select(x => new KeyValuePair<string, Type>(x, typeof(object))));
         }
 
 
-
+        public static Type CreateAnonymousType(IEnumerable<KeyValuePair<string, Type>> fields)
+        {
+#if STANDALONE
+            return DynamicAnonymousType.CreateAnonymousType(fields);
+#else
+            return Querylang.QType.CreateAnonymousType(fieldNames.Select(x => new KeyValuePair<string, Type>(x, typeof(object)))).clrType;
+#endif
+        }
 
         public static IEnumerable<object> CreateAnonymousEnumerable<T>(IEnumerable<T> items, IReadOnlyList<(string name, Func<T, object> retriever)> fields, out Type elementType)
         {
-            var t = ReplExtensions.CreateAnonymousType(fields.Select(x => x.name));
+            var t = CreateAnonymousType(fields.Select(x => x.name));
             elementType = t;
 
             var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericTypeFast(t));
@@ -1402,8 +1420,120 @@ namespace Xamasoft
         }
 
 
-#endif
+    }
 
+
+
+    public abstract class OutputEmitter : IDisposable
+    {
+
+
+
+        [Configuration]
+        public static int Configuration_BatchSize = 10;
+        protected IReadOnlyList<(string name, Func<object, object> retriever)> fields;
+        protected Func<object> ctor;
+        protected List<Action<object, object>> setters;
+
+        public abstract void Flush();
+        public abstract void Dispose();
+        public abstract void Emit(object obj);
+
+        public static OutputEmitter Create(string outfile, Type elementType)
+        {
+            return (OutputEmitter)Activator.CreateInstance(typeof(OutputEmitter<>).MakeGenericTypeFast(elementType), new object[] { outfile });
+        }
+
+        internal static OutputEmitter Create<TSource>(string outfile, IReadOnlyList<(string name, Func<TSource, object> retriever)> fields)
+        {
+            if (fields.Select(x => x.name).Distinct().Count() != fields.Count)
+            {
+                var f = new List<(string name, Func<TSource, object> retriever)>();
+
+                foreach (var field_ in fields)
+                {
+                    var field = field_;
+                    var cn = field.name;
+                    var i = 2;
+                    while (f.Any(x => x.name == cn))
+                    {
+                        cn = field.name + i;
+                        i++;
+                    }
+                    field.name = cn;
+                    f.Add(field);
+                }
+
+                fields = f;
+            }
+            var elemType = ReplExtensions.CreateAnonymousType(fields.Select(x => x.name));
+
+            var z = Create(outfile, elemType);
+            z.fields = fields.Select(x=>(x.name, new Func<object, object>(y=>x.retriever((TSource)y)))).ToList();
+            z.ctor = ReflectionHelper.GetWrapper<Func<object>>(elemType, ".ctor");
+            z.setters = fields.Select(x => ReflectionHelper.GetSetter<object, object>(elemType.GetField(x.name))).ToList();
+            return z;
+        }
+    }
+
+    public class OutputEmitter<T> : OutputEmitter
+    {
+        private string outfile;
+
+        private List<T> batch = new List<T>();
+        private bool mustCollectAll;
+
+        private ReplExtensions.ContinuationInfo info;
+
+        public OutputEmitter(string outfile)
+        {
+            outfile = outfile ?? "CON:.txt-preformatted";
+            this.outfile = outfile;
+            this.info = new ReplExtensions.ContinuationInfo();
+            mustCollectAll = outfile.EndsWith(".xlsx") || outfile.EndsWith(".json") || outfile.StartsWith("CLIPBOARD:");
+        }
+
+        public void Emit(T obj)
+        {
+            batch.Add(obj);
+            if (!mustCollectAll && batch.Count >= Configuration_BatchSize) Flush();
+        }
+
+        public override void Dispose()
+        {
+            if (mustCollectAll)
+            {
+                batch.SaveTable(outfile);
+            }
+            else
+            { 
+                Flush();
+            }
+            batch = null;
+        }
+
+        public override void Flush()
+        {
+            if (mustCollectAll) return;
+            batch.SaveTable(outfile, ref info);
+            batch.Clear();
+        }
+
+        public override void Emit(object obj)
+        {
+            if (fields != null && obj != null)
+            {
+                var k = ctor();
+                for (int i = 0; i < fields.Count; i++)
+                {
+                    
+                    var v = fields[i].retriever(obj);
+                    setters[i](k, v);
+                }
+                obj = (T)k;
+            }
+            Emit((T)obj);
+        }
     }
 
 
